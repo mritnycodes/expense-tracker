@@ -1,388 +1,218 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { LocalNotifications } from '@capacitor/local-notifications';
+import { useState, useEffect } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db, LocalExpense } from '@/lib/db';
+import { useSyncEngine } from '@/hooks/useSyncEngine';
+import { requestNotificationPermissions, scheduleCreditCardReminder } from '@/lib/notifications';
+import { supabase } from '@/lib/supabase';
 
-interface ExpenseItem {
-  id: string;
-  title: string;
-  amount: number;
-  category: string;
-  date: string;
-}
-
-interface CreditCardInfo {
+// Define Card interface
+interface CardItem {
   id: string;
   name: string;
-  cycleStart: string;
-  cycleEnd: string;
-  dueDate: string;
+  type: 'credit' | 'debit';
+  due_day?: number;
 }
 
-export default function ExpenseTrackerApp() {
-  // Auth State
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [authInputEmail, setAuthInputEmail] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
+export default function ExpenseTrackerHome() {
+  useSyncEngine();
 
-  // Navigation State
-  const [mainTab, setMainTab] = useState<'output' | 'input'>('output');
-  const [inputSubTab, setInputSubTab] = useState<'normal' | 'debit' | 'credit'>('normal');
+  const expenses = useLiveQuery(() => db.expenses.orderBy('date').reverse().toArray()) || [];
 
-  // Dynamic Data Lists
-  const [normalExpenses, setNormalExpenses] = useState<ExpenseItem[]>([]);
-  const [debitExpenses, setDebitExpenses] = useState<ExpenseItem[]>([]);
-  const [creditExpenses, setCreditExpenses] = useState<any[]>([]);
-  const [creditCards, setCreditCards] = useState<CreditCardInfo[]>([]);
+  // Theme state: 'light' or 'dark'
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [activeTab, setActiveTab] = useState<'input' | 'output'>('input');
+  const [expenseType, setExpenseType] = useState<'normal' | 'debit' | 'credit'>('normal');
 
-  // Form Inputs - Normal/Debit
+  // Cards State
+  const [cards, setCards] = useState<CardItem[]>([]);
+  const [selectedCardId, setSelectedCardId] = useState('');
+  const [newCardName, setNewCardName] = useState('');
+  const [newCardType, setNewCardType] = useState<'credit' | 'debit'>('credit');
+  const [newCardDueDay, setNewCardDueDay] = useState('');
+
+  // Expense Form State
   const [title, setTitle] = useState('');
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('General');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [dueDate, setDueDate] = useState('');
 
-  // Form Inputs - Credit Card Management
-  const [newCardName, setNewCardName] = useState('');
-  const [newCycleStart, setNewCycleStart] = useState('');
-  const [newCycleEnd, setNewCycleEnd] = useState('');
-  const [newDueDate, setNewDueDate] = useState('');
-
-  // Form Inputs - Credit Expense
-  const [selectedCardId, setSelectedCardId] = useState('');
-  const [creditTopic, setCreditTopic] = useState('');
-  const [creditAmount, setCreditAmount] = useState('');
-
-  // Request Notification Permissions
+  // Fetch cards from Supabase on mount
   useEffect(() => {
-    async function initNotifications() {
-      try {
-        const perm = await LocalNotifications.checkPermissions();
-        if (perm.display !== 'granted') {
-          await LocalNotifications.requestPermissions();
-        }
-      } catch (e) {
-        console.log('Running on web preview');
-      }
+    async function fetchCards() {
+      const { data } = await supabase.from('cards').select('*');
+      if (data) setCards(data);
     }
-    initNotifications();
+    fetchCards();
   }, []);
 
-  // Handle Login / Sign Up
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!authInputEmail) return;
-    setUserEmail(authInputEmail);
-    setAuthInputEmail('');
-    setAuthPassword('');
+  const handleAddCard = async () => {
+    if (!newCardName) return;
+    const { data, error } = await supabase.from('cards').insert([
+      {
+        name: newCardName,
+        type: newCardType,
+        due_day: newCardDueDay ? parseInt(newCardDueDay) : null,
+      }
+    ]).select();
+
+    if (!error && data) {
+      setCards(prev => [...prev, data[0]]);
+      setNewCardName('');
+      setNewCardDueDay('');
+      alert('Card added successfully!');
+    } else {
+      alert('Error adding card: ' + error?.message);
+    }
   };
 
-  // Handle Logout
-  const handleLogout = () => {
-    setUserEmail(null);
-    setNormalExpenses([]);
-    setDebitExpenses([]);
-    setCreditExpenses([]);
-    setCreditCards([]);
+  const totalSpent = expenses.reduce((acc, curr) => acc + curr.amount, 0);
+  const normalSpent = expenses.filter(e => e.category !== 'Debit' && e.category !== 'Credit').reduce((acc, curr) => acc + curr.amount, 0);
+  const debitSpent = expenses.filter(e => e.category === 'Debit').reduce((acc, curr) => acc + curr.amount, 0);
+  const creditSpent = expenses.filter(e => e.category === 'Credit').reduce((acc, curr) => acc + curr.amount, 0);
+
+  const toggleTheme = () => {
+    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
   };
 
   const handleEnableAlerts = async () => {
-    try {
-      await LocalNotifications.schedule({
-        notifications: [
-          {
-            title: '💳 Payment Reminder Active',
-            body: `Alerts set for account: ${userEmail}`,
-            id: 999,
-            schedule: { at: new Date(Date.now() + 2000) }
-          }
-        ]
-      });
-      alert('Alerts enabled successfully!');
-    } catch (e) {
-      alert('Alerts enabled (Native notification hook ready).');
+    const granted = await requestNotificationPermissions();
+    if (granted) {
+      alert('Notification permissions granted successfully!');
+    } else {
+      alert('Notification permissions were denied.');
     }
   };
 
-  // Calculations
-  const normalTotal = normalExpenses.reduce((sum, item) => sum + item.amount, 0);
-  const debitTotal = debitExpenses.reduce((sum, item) => sum + item.amount, 0);
-  const creditTotal = creditExpenses.reduce((sum, item) => sum + item.amount, 0);
-  const totalSpending = normalTotal + debitTotal + creditTotal;
-
-  // Expense Handlers
-  const handleSaveExpense = (e: React.FormEvent) => {
+  const handleAddExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title || !amount) return;
 
-    const newItem: ExpenseItem = {
-      id: editingId || Date.now().toString(),
+    const parsedAmount = parseFloat(amount);
+    const categoryToUse = expenseType === 'credit' ? 'Credit' : expenseType === 'debit' ? 'Debit' : category;
+
+    const newExpense: LocalExpense = {
+      id: crypto.randomUUID(),
       title,
-      amount: parseFloat(amount),
-      category,
-      date
+      amount: parsedAmount,
+      category: categoryToUse,
+      date,
+      user_id: 'mrithinee@gmail.com',
+      synced: false,
     };
 
-    if (inputSubTab === 'normal') {
-      if (editingId) {
-        setNormalExpenses(normalExpenses.map(i => i.id === editingId ? newItem : i));
-      } else {
-        setNormalExpenses([newItem, ...normalExpenses]);
-      }
-    } else if (inputSubTab === 'debit') {
-      if (editingId) {
-        setDebitExpenses(debitExpenses.map(i => i.id === editingId ? newItem : i));
-      } else {
-        setDebitExpenses([newItem, ...debitExpenses]);
-      }
+    await db.expenses.add(newExpense);
+
+    if (expenseType === 'credit' && dueDate) {
+      await scheduleCreditCardReminder(title, parsedAmount, dueDate);
     }
 
     setTitle('');
     setAmount('');
-    setEditingId(null);
+    setDueDate('');
+    setSelectedCardId('');
+    alert('Expense recorded successfully!');
   };
 
-  const handleDeleteExpense = (id: string, type: 'normal' | 'debit') => {
-    if (type === 'normal') {
-      setNormalExpenses(normalExpenses.filter(i => i.id !== id));
-    } else {
-      setDebitExpenses(debitExpenses.filter(i => i.id !== id));
-    }
-  };
+  const isDark = theme === 'dark';
 
-  const handleEditExpense = (item: ExpenseItem) => {
-    setTitle(item.title);
-    setAmount(item.amount.toString());
-    setCategory(item.category);
-    setDate(item.date);
-    setEditingId(item.id);
-  };
-
-  // Card Handlers
-  const handleAddCard = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newCardName) return;
-    const card: CreditCardInfo = {
-      id: Date.now().toString(),
-      name: newCardName,
-      cycleStart: newCycleStart || '2026-10-01',
-      cycleEnd: newCycleEnd || '2026-10-31',
-      dueDate: newDueDate || '2026-11-05'
-    };
-    setCreditCards([...creditCards, card]);
-    if (!selectedCardId) setSelectedCardId(card.id);
-    setNewCardName('');
-    setNewCycleStart('');
-    setNewCycleEnd('');
-    setNewDueDate('');
-  };
-
-  const handleDeleteCard = (id: string) => {
-    setCreditCards(creditCards.filter(c => c.id !== id));
-    if (selectedCardId === id) setSelectedCardId('');
-  };
-
-  const handleSaveCreditExpense = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!creditTopic || !creditAmount || !selectedCardId) return;
-    const card = creditCards.find(c => c.id === selectedCardId);
-    const item = {
-      id: Date.now().toString(),
-      cardId: selectedCardId,
-      cardName: card ? card.name : 'Credit Card',
-      title: creditTopic,
-      amount: parseFloat(creditAmount),
-      date: new Date().toISOString().split('T')[0]
-    };
-    setCreditExpenses([...creditExpenses, item]);
-    setCreditTopic('');
-    setCreditAmount('');
-  };
-
-  // -------------------------------------------------------------
-  // AUTHENTICATION SCREEN (IF NOT LOGGED IN)
-  // -------------------------------------------------------------
-  if (!userEmail) {
-    return (
-      <main className="min-h-screen bg-[#090d16] text-slate-100 p-4 flex items-center justify-center font-sans">
-        <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-5">
-          <div className="text-center">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-amber-500 to-amber-300 mx-auto flex items-center justify-center text-slate-950 font-bold text-xl mb-3 shadow-lg shadow-amber-500/20">
-              💳
-            </div>
-            <h1 className="text-xl font-bold text-white">Expense Tracker</h1>
-            <p className="text-xs text-slate-400 mt-1">Sign in with your email to access your account</p>
-          </div>
-
-          <form onSubmit={handleLogin} className="space-y-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1">Email Address</label>
-              <input 
-                type="email"
-                placeholder="name@example.com"
-                value={authInputEmail}
-                onChange={(e) => setAuthInputEmail(e.target.value)}
-                required
-                className="w-full bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1">Password</label>
-              <input 
-                type="password"
-                placeholder="••••••••"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                required
-                className="w-full bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500"
-              />
-            </div>
-            <button 
-              type="submit" 
-              className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs py-3 rounded-xl shadow-md shadow-amber-500/15 transition active:scale-95"
-            >
-              Sign In / Continue
-            </button>
-          </form>
-        </div>
-      </main>
-    );
-  }
-
-  // -------------------------------------------------------------
-  // MAIN APP SCREEN (LOGGED IN)
-  // -------------------------------------------------------------
   return (
-    <main className="min-h-screen bg-[#090d16] text-slate-100 p-4 pb-24 max-w-md mx-auto font-sans selection:bg-amber-500 selection:text-black">
+    <main className={`min-h-screen p-4 sm:p-6 max-w-md mx-auto font-sans pb-12 transition-colors duration-300 ${
+      isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'
+    }`}>
       
-      {/* Dynamic Profile Header */}
-      <div className="flex items-center justify-between bg-slate-900/80 border border-slate-800/80 p-3 rounded-2xl mb-4 backdrop-blur-md shadow-lg shadow-black/40">
-        <div className="flex items-center gap-3 overflow-hidden">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center text-slate-950 font-bold text-sm shadow-md shadow-amber-500/20 shrink-0">
-            {userEmail.charAt(0).toUpperCase()}
+      {/* Top User Session & Theme Toggle Banner */}
+      <div className={`border p-4 rounded-2xl shadow-sm flex items-center justify-between mb-4 transition-colors ${
+        isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+      }`}>
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 bg-amber-500 text-white font-bold rounded-full flex items-center justify-center text-sm shadow">
+            M
           </div>
-          <div className="truncate">
-            <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Logged In As</p>
-            <p className="text-xs font-semibold text-white truncate">{userEmail}</p>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider font-semibold opacity-60">Logged in as</p>
+            <p className="text-xs font-bold">mrithinee@gmail.com</p>
           </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={toggleTheme}
+            className={`p-2 rounded-xl text-xs font-semibold border transition-colors ${
+              isDark ? 'bg-slate-800 border-slate-700 text-amber-400 hover:bg-slate-700' : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+            }`}
+            title="Toggle Light/Dark Mode"
+          >
+            {isDark ? '☀️ Light' : '🌙 Dark'}
+          </button>
+
+          <button
+            onClick={() => {
+              supabase.auth.signOut();
+              localStorage.clear();
+              window.location.href = '/login';
+            }}
+            className={`text-xs font-semibold px-3 py-2 rounded-xl transition-colors border ${
+              isDark ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            Logout
+          </button>
         </div>
       </div>
 
-      {/* Action Controls Bar */}
-      <div className="grid grid-cols-2 gap-2 mb-5">
-        <button 
+      {/* Action Utility Bar */}
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <button
           onClick={handleEnableAlerts}
-          className="bg-amber-500 hover:bg-amber-400 active:scale-95 transition text-slate-950 text-xs font-bold py-2.5 px-3 rounded-xl shadow-md shadow-amber-500/15 flex items-center justify-center gap-1.5"
+          className="bg-amber-400 hover:bg-amber-500 text-slate-950 font-semibold py-2.5 px-4 rounded-xl text-xs transition shadow-sm flex items-center justify-center gap-1.5"
         >
-          <span>🔔</span> Enable Alerts
+          🔔 Enable Alerts
         </button>
-        <button 
-          onClick={handleLogout}
-          className="bg-slate-800 hover:bg-slate-700 active:scale-95 transition text-slate-300 border border-slate-700/80 text-xs font-semibold py-2.5 px-3 rounded-xl flex items-center justify-center"
-        >
-          Logout
-        </button>
+        <div className={`border rounded-xl p-1 shadow-sm flex transition-colors ${
+          isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'
+        }`}>
+          <button
+            onClick={() => setActiveTab('input')}
+            className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+              activeTab === 'input' 
+                ? 'bg-indigo-600 text-white shadow' 
+                : isDark ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            Input
+          </button>
+          <button
+            onClick={() => setActiveTab('output')}
+            className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+              activeTab === 'output' 
+                ? 'bg-indigo-600 text-white shadow' 
+                : isDark ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            Reports
+          </button>
+        </div>
       </div>
 
-      {/* Main Tab Switcher */}
-      <div className="flex bg-slate-900/90 p-1.5 rounded-2xl border border-slate-800 mb-6 shadow-inner">
-        <button 
-          onClick={() => setMainTab('input')}
-          className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold transition duration-200 flex items-center justify-center gap-1.5 ${
-            mainTab === 'input' 
-              ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20' 
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <span>💸</span> Input Expenses
-        </button>
-        <button 
-          onClick={() => setMainTab('output')}
-          className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold transition duration-200 flex items-center justify-center gap-1.5 ${
-            mainTab === 'output' 
-              ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20' 
-              : 'text-slate-400 hover:text-white'
-          }`}
-        >
-          <span>📊</span> Output & Reports
-        </button>
-      </div>
-
-      {/* TAB 1: OUTPUT & REPORTS VIEW */}
-      {mainTab === 'output' && (
-        <section className="space-y-5 animate-in fade-in duration-200">
-          <div className="relative overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-slate-800 p-5 rounded-2xl shadow-xl shadow-black/50">
-            <div className="absolute -right-8 -top-8 w-28 h-28 bg-amber-500/10 rounded-full blur-2xl"></div>
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Total Spending</p>
-            <p className="text-3xl font-black text-white tracking-tight mb-4">₹{totalSpending.toLocaleString()}</p>
-
-            <div className="space-y-2 pt-3 border-t border-slate-800/80 text-xs">
-              <div className="flex justify-between items-center py-1 border-b border-slate-800/40">
-                <span className="text-slate-400">Normal Expenses</span>
-                <span className="font-bold text-slate-200">₹{normalTotal.toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between items-center py-1 border-b border-slate-800/40">
-                <span className="text-slate-400">Debit Card Expenses</span>
-                <span className="font-bold text-slate-200">₹{debitTotal.toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between items-center py-1">
-                <span className="text-slate-400">Credit Card Expenses</span>
-                <span className="font-bold text-amber-400">₹{creditTotal.toLocaleString()}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-slate-900/60 border border-slate-800 p-5 rounded-2xl shadow-lg">
-            <h3 className="text-sm font-bold text-white flex items-center gap-2 mb-4">
-              <span>🔔</span> Due Date Status & Reminders
-            </h3>
-
-            {creditCards.length === 0 ? (
-              <p className="text-xs text-slate-500 text-center py-2">No credit cards added yet.</p>
-            ) : (
-              creditCards.map(card => {
-                const cardExpensesTotal = creditExpenses
-                  .filter(e => e.cardId === card.id)
-                  .reduce((sum, e) => sum + e.amount, 0);
-
-                return (
-                  <div key={card.id} className="bg-slate-950/80 border border-slate-800/80 p-4 rounded-xl space-y-2 mb-3">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <p className="font-bold text-white text-base">{card.name}</p>
-                        <p className="text-[11px] text-slate-400">Cycle: {card.cycleStart} to {card.cycleEnd}</p>
-                      </div>
-                      <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-1 rounded-md border border-amber-500/20">
-                        ₹{cardExpensesTotal.toLocaleString()}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 text-xs">
-                      <span className="text-slate-400">Due Date: <strong className="text-white">{card.dueDate}</strong></span>
-                      <span className="text-emerald-400 font-semibold flex items-center gap-1 bg-emerald-500/10 px-2 py-0.5 rounded-full text-[11px] border border-emerald-500/20">
-                        ✅ On Track
-                      </span>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </section>
-      )}
-
-      {/* TAB 2: INPUT EXPENSES VIEW */}
-      {mainTab === 'input' && (
-        <section className="space-y-5 animate-in fade-in duration-200">
-          <div className="flex bg-slate-900/80 p-1 rounded-xl border border-slate-800/80">
+      {/* TAB CONTENT: INPUT EXPENSES */}
+      {activeTab === 'input' && (
+        <div className="space-y-4">
+          {/* Expense Type Switcher */}
+          <div className={`border p-1.5 rounded-2xl shadow-sm grid grid-cols-3 gap-2 transition-colors ${
+            isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'
+          }`}>
             {(['normal', 'debit', 'credit'] as const).map((type) => (
-              <button 
+              <button
                 key={type}
-                onClick={() => setInputSubTab(type)}
-                className={`flex-1 py-2 text-xs font-semibold rounded-lg capitalize transition ${
-                  inputSubTab === type 
-                    ? 'bg-slate-800 text-amber-400 shadow-sm border border-slate-700/60' 
-                    : 'text-slate-400 hover:text-white'
+                type="button"
+                onClick={() => setExpenseType(type)}
+                className={`py-2 text-xs font-bold rounded-xl capitalize transition-all ${
+                  expenseType === type 
+                    ? 'bg-indigo-600 text-white shadow' 
+                    : isDark ? 'text-slate-400 hover:bg-slate-800' : 'text-slate-600 hover:bg-slate-100'
                 }`}
               >
                 {type === 'credit' ? 'Credit Cards' : type}
@@ -390,205 +220,233 @@ export default function ExpenseTrackerApp() {
             ))}
           </div>
 
-          {(inputSubTab === 'normal' || inputSubTab === 'debit') && (
-            <div className="bg-slate-900/80 border border-slate-800 p-5 rounded-2xl shadow-lg space-y-4">
-              <h2 className="text-sm font-bold text-white">
-                {editingId ? 'Edit' : 'Add'} {inputSubTab === 'normal' ? 'Normal' : 'Debit'} Expense
-              </h2>
+          {/* Card Management Section (Appears when Credit or Debit is selected) */}
+          {(expenseType === 'credit' || expenseType === 'debit') && (
+            <div className={`border p-4 rounded-2xl shadow-sm space-y-3 transition-colors ${
+              isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+            }`}>
+              <h3 className="text-xs font-bold text-indigo-400 uppercase tracking-wider">Manage & Add {expenseType.toUpperCase()} Cards</h3>
               
-              <form onSubmit={handleSaveExpense} className="space-y-3">
-                <div className="grid grid-cols-2 gap-2.5">
-                  <input 
-                    type="text" 
-                    placeholder="Title (e.g., Groceries)" 
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    required
-                    className="w-full bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500 transition"
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  placeholder="Card Name (e.g. HDFC Regalia)"
+                  value={newCardName}
+                  onChange={(e) => setNewCardName(e.target.value)}
+                  className={`w-full border rounded-xl p-2.5 text-xs outline-none transition-colors ${
+                    isDark ? 'bg-slate-950 border-slate-800 text-white placeholder-slate-600' : 'bg-slate-50 border-slate-200 text-slate-900'
+                  }`}
+                />
+                
+                {expenseType === 'credit' && (
+                  <input
+                    type="number"
+                    placeholder="Statement Due Day (1 - 31)"
+                    min="1"
+                    max="31"
+                    value={newCardDueDay}
+                    onChange={(e) => setNewCardDueDay(e.target.value)}
+                    className={`w-full border rounded-xl p-2.5 text-xs outline-none transition-colors ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white placeholder-slate-600' : 'bg-slate-50 border-slate-200 text-slate-900'
+                    }`}
                   />
-                  <input 
-                    type="number" 
-                    placeholder="Amount (₹)" 
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleAddCard}
+                  className="w-full bg-slate-800 hover:bg-slate-700 text-indigo-300 font-semibold py-2 rounded-xl text-xs transition border border-slate-700"
+                >
+                  + Save New Card
+                </button>
+              </div>
+
+              {/* Saved Cards Selector Dropdown */}
+              {cards.filter(c => c.type === expenseType).length > 0 && (
+                <div>
+                  <label className="block text-[11px] font-semibold mb-1 opacity-80">Select From Saved Cards</label>
+                  <select
+                    value={selectedCardId}
+                    onChange={(e) => {
+                      setSelectedCardId(e.target.value);
+                      const found = cards.find(c => c.id === e.target.value);
+                      if (found) setTitle(found.name);
+                    }}
+                    className={`w-full border rounded-xl p-2.5 text-xs outline-none transition-colors ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'
+                    }`}
+                  >
+                    <option value="">-- Choose saved card --</option>
+                    {cards.filter(c => c.type === expenseType).map((card) => (
+                      <option key={card.id} value={card.id}>
+                        {card.name} {card.due_day ? `(Due: ${card.due_day})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Form Card */}
+          <div className={`border p-5 rounded-2xl shadow-sm space-y-4 transition-colors ${
+            isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+          }`}>
+            <h2 className="text-sm font-bold">
+              {expenseType === 'credit' ? 'Add Credit Card Bill & Due Date' : `Add ${expenseType.toUpperCase()} Expense`}
+            </h2>
+
+            <form onSubmit={handleAddExpense} className="space-y-3.5">
+              <div>
+                <label className={`block text-xs font-semibold mb-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Title / Card Name</label>
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder={expenseType === 'credit' ? "e.g. HDFC Regalia" : "e.g. Groceries"}
+                  className={`w-full border rounded-xl p-3 text-sm outline-none transition-colors ${
+                    isDark ? 'bg-slate-950 border-slate-800 text-white placeholder-slate-600 focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-indigo-500'
+                  }`}
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={`block text-xs font-semibold mb-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Amount (₹)</label>
+                  <input
+                    type="number"
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
+                    placeholder="0.00"
+                    className={`w-full border rounded-xl p-3 text-sm outline-none transition-colors ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white placeholder-slate-600 focus:border-indigo-500' : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400 focus:ring-2 focus:ring-indigo-500'
+                    }`}
                     required
-                    className="w-full bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500 transition"
                   />
                 </div>
-
-                <div className="grid grid-cols-2 gap-2.5">
-                  <select 
-                    value={category} 
-                    onChange={(e) => setCategory(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 text-white text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500 transition"
-                  >
-                    <option value="General">General</option>
-                    <option value="Food">Food & Drinks</option>
-                    <option value="Bills">Bills & Utilities</option>
-                  </select>
-
-                  <input 
-                    type="date" 
+                <div>
+                  <label className={`block text-xs font-semibold mb-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Transaction Date</label>
+                  <input
+                    type="date"
                     value={date}
                     onChange={(e) => setDate(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 text-white text-xs rounded-xl px-3 py-2.5 focus:outline-none focus:border-amber-500 transition"
+                    className={`w-full border rounded-xl p-2.5 text-xs outline-none transition-colors ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'
+                    }`}
                   />
                 </div>
-
-                <button 
-                  type="submit" 
-                  className="w-full bg-amber-500 hover:bg-amber-400 active:scale-95 transition text-slate-950 font-bold text-xs py-3 rounded-xl shadow-md shadow-amber-500/15"
-                >
-                  Save {inputSubTab === 'normal' ? 'Normal' : 'Debit'} Expense
-                </button>
-              </form>
-
-              <div className="mt-5 pt-4 border-t border-slate-800/80 space-y-2.5">
-                {(inputSubTab === 'normal' ? normalExpenses : debitExpenses).map((item) => (
-                  <div key={item.id} className="bg-slate-950/60 border border-slate-800/60 p-3.5 rounded-xl flex items-center justify-between">
-                    <div>
-                      <p className="font-semibold text-sm text-white">{item.title}</p>
-                      <p className="text-[11px] text-slate-400">{item.category} • {item.date}</p>
-                      <p className="text-sm font-bold text-amber-400 mt-0.5">₹{item.amount.toLocaleString()}</p>
-                    </div>
-
-                    <div className="flex gap-1.5">
-                      <button 
-                        onClick={() => handleEditExpense(item)} 
-                        className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-2.5 py-1.5 rounded-lg border border-slate-700 transition"
-                      >
-                        ✏️
-                      </button>
-                      <button 
-                        onClick={() => handleDeleteExpense(item.id, inputSubTab)} 
-                        className="bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 text-xs px-2.5 py-1.5 rounded-lg border border-rose-800/40 transition"
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  </div>
-                ))}
               </div>
-            </div>
-          )}
 
-          {inputSubTab === 'credit' && (
-            <div className="space-y-5">
-              <div className="bg-slate-900/80 border border-slate-800 p-5 rounded-2xl shadow-lg space-y-4">
-                <h2 className="text-sm font-bold text-white">Manage Credit Cards</h2>
-
-                {creditCards.map((card) => (
-                  <div key={card.id} className="bg-slate-950/80 border border-slate-800/80 p-3.5 rounded-xl flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-white text-sm">{card.name}</p>
-                      <p className="text-xs text-slate-400">Due: {card.dueDate}</p>
-                    </div>
-                    <div className="flex gap-1.5">
-                      <button 
-                        onClick={() => handleDeleteCard(card.id)}
-                        className="bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 text-xs px-2.5 py-1.5 rounded-lg border border-rose-800/40"
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  </div>
-                ))}
-
-                <form onSubmit={handleAddCard} className="space-y-2.5 pt-3 border-t border-slate-800/80">
-                  <input 
-                    type="text" 
-                    placeholder="Card Name (e.g., HDFC Regalia)" 
-                    value={newCardName}
-                    onChange={(e) => setNewCardName(e.target.value)}
-                    required
-                    className="w-full bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500"
+              {/* Conditional Credit Card Due Date Field */}
+              {expenseType === 'credit' && (
+                <div className={`border p-3.5 rounded-xl space-y-2 transition-colors ${
+                  isDark ? 'bg-indigo-950/40 border-indigo-900/50 text-indigo-200' : 'bg-indigo-50/50 border-indigo-100 text-indigo-900'
+                }`}>
+                  <label className="block text-xs font-bold">Credit Card Due Date (For Notifications)</label>
+                  <input
+                    type="date"
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                    className={`w-full border rounded-xl p-2.5 text-xs outline-none transition-colors ${
+                      isDark ? 'bg-slate-900 border-indigo-900 text-white' : 'bg-white border-indigo-200 text-slate-900'
+                    }`}
+                    required={expenseType === 'credit'}
                   />
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <input 
-                      type="date" 
-                      value={newCycleStart}
-                      onChange={(e) => setNewCycleStart(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 text-white text-[10px] px-1.5 py-2 rounded-xl"
-                    />
-                    <input 
-                      type="date" 
-                      value={newCycleEnd}
-                      onChange={(e) => setNewCycleEnd(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 text-white text-[10px] px-1.5 py-2 rounded-xl"
-                    />
-                    <input 
-                      type="date" 
-                      value={newDueDate}
-                      onChange={(e) => setNewDueDate(e.target.value)}
-                      className="bg-slate-950 border border-slate-800 text-white text-[10px] px-1.5 py-2 rounded-xl"
-                    />
-                  </div>
-                  <button type="submit" className="w-full bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 font-bold text-xs py-2.5 rounded-xl transition">
-                    + Add Card
-                  </button>
-                </form>
-              </div>
-
-              <div className="bg-slate-900/80 border border-slate-800 p-5 rounded-2xl shadow-lg space-y-4">
-                <h3 className="text-sm font-bold text-white">Save Credit Expense</h3>
-                <form onSubmit={handleSaveCreditExpense} className="space-y-3">
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <select 
-                      value={selectedCardId}
-                      onChange={(e) => setSelectedCardId(e.target.value)}
-                      required
-                      className="w-full bg-slate-950 border border-slate-800 text-white text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500"
-                    >
-                      <option value="" disabled>Select Card</option>
-                      {creditCards.map(c => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
-                      ))}
-                    </select>
-                    <input 
-                      type="text" 
-                      placeholder="Topic / Note" 
-                      value={creditTopic}
-                      onChange={(e) => setCreditTopic(e.target.value)}
-                      required
-                      className="w-full bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500"
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <input 
-                      type="number" 
-                      placeholder="Amount (₹)" 
-                      value={creditAmount}
-                      onChange={(e) => setCreditAmount(e.target.value)}
-                      required
-                      className="flex-1 bg-slate-950 border border-slate-800 text-white placeholder-slate-500 text-xs rounded-xl px-3.5 py-3 focus:outline-none focus:border-amber-500"
-                    />
-                    <button type="submit" className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs px-4 py-3 rounded-xl shadow-md shadow-amber-500/15 transition">
-                      Save
-                    </button>
-                  </div>
-                </form>
-
-                <div className="mt-4 pt-3 border-t border-slate-800/80 space-y-2">
-                  {creditExpenses.map((item) => (
-                    <div key={item.id} className="bg-slate-950/60 border border-slate-800/60 p-3 rounded-xl flex justify-between items-center text-xs">
-                      <div>
-                        <p className="font-semibold text-white">{item.title}</p>
-                        <p className="text-[10px] text-slate-400">{item.cardName}</p>
-                      </div>
-                      <p className="text-amber-400 font-bold">₹{item.amount.toLocaleString()}</p>
-                    </div>
-                  ))}
+                  <p className="text-[11px] opacity-80">A local notification reminder will be scheduled on this due date.</p>
                 </div>
-              </div>
-            </div>
-          )}
-        </section>
+              )}
+
+              {expenseType === 'normal' && (
+                <div>
+                  <label className={`block text-xs font-semibold mb-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Category</label>
+                  <select
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value)}
+                    className={`w-full border rounded-xl p-3 text-sm outline-none transition-colors ${
+                      isDark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'
+                    }`}
+                  >
+                    <option value="General">General</option>
+                    <option value="Food">Food</option>
+                    <option value="Travel">Travel</option>
+                    <option value="Bills">Bills</option>
+                  </select>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-3 rounded-xl text-sm transition shadow-md shadow-indigo-600/20 mt-2"
+              >
+                Save {expenseType.toUpperCase()} Expense
+              </button>
+            </form>
+          </div>
+        </div>
       )}
 
-      <div className="mt-8 pt-4 border-t border-slate-800/80 text-[11px] text-slate-500 text-center font-medium">
-        Expense Tracker • Dynamic Multi-User UI
-      </div>
+      {/* TAB CONTENT: OUTPUT & REPORTS */}
+      {activeTab === 'output' && (
+        <div className="space-y-4">
+          <div className={`border p-5 rounded-2xl shadow-sm space-y-4 transition-colors ${
+            isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+          }`}>
+            <h2 className="text-xs font-bold opacity-60 uppercase tracking-wider">Total Spending</h2>
+            <p className="text-2xl font-extrabold">₹{totalSpent.toFixed(2)}</p>
 
+            <div className={`border-t pt-3 space-y-2.5 ${isDark ? 'border-slate-800' : 'border-slate-100'}`}>
+              <div className="flex justify-between text-xs font-medium opacity-80">
+                <span>Normal Expenses</span>
+                <span className="font-bold">₹{normalSpent.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-xs font-medium opacity-80">
+                <span>Debit Card Expenses</span>
+                <span className="font-bold">₹{debitSpent.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-xs font-medium opacity-80">
+                <span>Credit Card Expenses</span>
+                <span className="font-bold">₹{creditSpent.toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Due Date Status & Reminders Section */}
+          <div className={`border p-5 rounded-2xl shadow-sm space-y-3 transition-colors ${
+            isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+          }`}>
+            <h3 className="text-xs font-bold flex items-center gap-1.5">
+              <span>🔔</span> Due Date Status & Reminders
+            </h3>
+            {expenses.filter(e => e.category === 'Credit').length === 0 ? (
+              <p className="text-xs opacity-50 text-center py-4">No credit cards added yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {expenses.filter(e => e.category === 'Credit').map((card) => (
+                  <div key={card.id} className={`border p-3 rounded-xl flex justify-between items-center transition-colors ${
+                    isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  }`}>
+                    <div>
+                      <p className="text-xs font-bold">{card.title}</p>
+                      <p className="text-[10px] opacity-60">Billed: ₹{card.amount}</p>
+                    </div>
+                    <span className={`text-[10px] border px-2 py-1 rounded-lg font-semibold ${
+                      isDark ? 'bg-indigo-950/60 text-indigo-300 border-indigo-900' : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                    }`}>
+                      Active Alert
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Footer Branding */}
+      <div className="text-center mt-6">
+        <p className="text-[11px] opacity-40 font-medium">Expense Tracker • Dynamic Theme UI</p>
+      </div>
     </main>
   );
 }
